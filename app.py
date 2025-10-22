@@ -49,11 +49,12 @@ st.markdown("""
         display: block;
         margin-left: auto;
         margin-right: auto;
-        width: 90px; /* smaller logo */
+        width: 90px;
     }
-    .image-select {
-        text-align: center;
+    .dropdown-label {
         font-weight: 500;
+        color: #444;
+        margin-bottom: 0.3rem;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -81,7 +82,7 @@ if st.session_state.page == 'home':
 elif st.session_state.page == 'analyzer':
     st.title("🧠 Analyze Traffic Sign")
 
-    # Fetch image list from S3
+    # Image options (load once)
     if 'image_options' not in st.session_state:
         try:
             response = s3.list_objects_v2(Bucket=BUCKET_NAME, Prefix='inputs/', Delimiter='/')
@@ -95,26 +96,29 @@ elif st.session_state.page == 'analyzer':
         except Exception as e:
             st.session_state.image_options = [f"Error: {e}"]
 
-    # Image selection dropdown (non-editable)
-    selected_image = st.selectbox(
-        "🖼️ Choose a Traffic Sign Image:",
-        st.session_state.image_options,
-        key="img_select",
-        index=0,
-        help="Images are automatically fetched from your S3 inputs/ folder.",
-        label_visibility="visible"
-    )
+    # Button to reveal dropdown
+    if 'show_dropdown' not in st.session_state:
+        st.session_state.show_dropdown = False
 
-    # Display image selection button
-    st.markdown('<div class="image-select">👇 Click to confirm your image selection</div>', unsafe_allow_html=True)
     if st.button("Choose Me 🖼️", use_container_width=True):
-        st.session_state.selected_image = selected_image
-        st.toast(f"Selected: {selected_image}")
+        st.session_state.show_dropdown = True
 
-    # Context input
+    selected_image = None
+    if st.session_state.show_dropdown:
+        st.markdown('<div class="dropdown-label">📁 Select a Traffic Sign Image:</div>', unsafe_allow_html=True)
+        selected_image = st.selectbox(
+            "",
+            st.session_state.image_options,
+            key="img_select",
+            label_visibility="collapsed"
+        )
+        st.session_state.selected_image = selected_image
+        st.info(f"✅ Selected: {selected_image}")
+
+    # Driving context
     context_info = st.text_input("Driving Context (optional):", value="rainy, 60 km/h")
 
-    # Analyze button
+    # Analyze Sign button
     if st.button("Analyze Sign", use_container_width=True):
         if 'selected_image' not in st.session_state:
             st.warning("Please choose an image first using the 'Choose Me 🖼️' button.")
@@ -134,13 +138,15 @@ elif st.session_state.page == 'analyzer':
                     if response.status_code == 200:
                         result = response.json()
 
-                        st.subheader("📸 Selected Image:")
+                        # Output in a card-like container
+                        st.markdown("---")
+                        st.markdown("### 📸 Selected Image")
                         st.markdown(f"**{st.session_state.selected_image}**")
 
-                        st.subheader("📝 Sign Description:")
+                        st.markdown("### 📝 Sign Description")
                         st.write(result.get("sign_description", "No description available."))
 
-                        st.subheader("⚠️ Precaution & Warning:")
+                        st.markdown("### ⚠️ Precaution & Warning")
                         st.markdown(f"**\"{result.get('precaution_warning', 'No warning available.')}\"**")
 
                         st.success("✅ Analysis complete!")
@@ -151,5 +157,6 @@ elif st.session_state.page == 'analyzer':
 
     if st.button("← Back to Home", use_container_width=True):
         st.session_state.page = 'home'
+        st.session_state.show_dropdown = False
         st.rerun()
 
