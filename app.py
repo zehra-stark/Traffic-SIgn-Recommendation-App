@@ -1,23 +1,24 @@
 import streamlit as st
 import boto3
+import requests
 import json
 from datetime import datetime
 import base64
 import io
 
-# AWS clients (assumes AWS credentials are configured)
-s3 = boto3.client('s3')
-bedrock = boto3.client('bedrock-runtime')
-dynamodb = boto3.resource('dynamodb')
-table = dynamodb.Table('TrafficSignRecommendations')
+# AWS clients (S3 only for listing; region fixed to us-east-1 for security)
+s3 = boto3.client('s3', region_name='us-east-1')
 
 # Bucket name
 BUCKET_NAME = 'traffic-sign-project-bucket'
 
+# API Gateway URL (us-east-1 hardcoded; users can't change it)
+API_URL = "https://6awdqqg9fl.execute-api.us-east-1.amazonaws.com/dev"
+
 # Page config
 st.set_page_config(page_title="Traffic Sign Indicator", layout="wide")
 
-# Custom CSS for gradient background (red-orange-yellow like Whizlabs)
+# Custom CSS for gradient background (red-orange-yellow like Whizlabs) and centering
 st.markdown("""
 <style>
     [data-testid="stAppViewContainer"] {
@@ -30,9 +31,20 @@ st.markdown("""
         border-radius: 10px;
         text-align: center;
         color: #333;  /* Dark grey for visibility */
+        margin: 0 auto;
+        max-width: 800px;
     }
     h1, h2, p {
         color: #333 !important;
+    }
+    .stSelectbox > div > div > div {
+        text-align: center;
+    }
+    .stButton > button {
+        width: 100%;
+        background-color: #FF4500;
+        color: white;
+        border-radius: 5px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -59,116 +71,68 @@ if st.session_state.page == 'home':
 elif st.session_state.page == 'analyzer':
     st.title("🚦 Analyze Traffic Sign 🚦")
     
+    # Dynamically fetch images from S3 inputs/ folder
+    if 'image_options' not in st.session_state:
+        try:
+            response = s3.list_objects_v2(Bucket=BUCKET_NAME, Prefix='inputs/', Delimiter='/')
+            image_options = []
+            if 'Contents' in response:
+                for obj in response['Contents']:
+                    key = obj['Key']
+                    if key.lower().endswith(('.jpg', '.jpeg', '.png')):
+                        image_name = key.split('/')[-1]  # e.g., 'image-1.jpg'
+                        image_options.append(image_name)
+            st.session_state.image_options = sorted(image_options) if image_options else ['No images found']
+        except Exception as e:
+            st.session_state.image_options = ['Error loading images']
+    
     # Image selection dropdown
-    image_options = ['image-1.jpg', 'image-2.jpg', 'image-3.jpg', 'image-4.jpg']
-    selected_image = st.selectbox("Select an image from S3:", image_options, help="Choose image-*.jpg from inputs folder")
+    selected_image = st.selectbox("Select an image from S3 inputs/ folder:", st.session_state.image_options, help="Dynamically loaded from S3")
+    
+    # "Click me" button to trigger selection (optional, as selectbox auto-updates)
+    if st.button("Click me to Select Image", use_container_width=True):
+        st.rerun()  # Refresh to highlight selection
     
     context_info = st.text_input("Driving Context (optional, default: rainy, 60 km/h):", value="rainy, 60 km/h")
     
     if st.button("Analyze Sign", use_container_width=True):
-        with st.spinner("Analyzing traffic sign..."):
-            key = f"inputs/{selected_image}"
-            
-            # Step 1: Get image bytes from S3
-            image_response = s3.get_object(Bucket=BUCKET_NAME, Key=key)
-            image_bytes = image_response['Body'].read()
-            base64_image = base64.b64encode(image_bytes).decode('utf-8')
-            
-            # Step 2: Describe traffic sign with Bedrock
-            describe_prompt = (
-                "Describe the main traffic sign in this image precisely "
-                "(e.g., 'No Right Turn', 'Stop', or 'Speed Limit 60'). "
-                "Include shape, color, and symbols. Ignore the background."
-            )
-            
-            describe_body = json.dumps({
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"text": describe_prompt},
-                            {
-                                "image": {
-                                    "format": "jpeg" if key.lower().endswith('.jpg') else "png",
-                                    "source": {"bytes": base64_image}
-                                }
-                            }
-                        ]
-                    }
-                ],
-                "inferenceConfig": {"maxTokens": 50, "temperature": 0.3}
-            })
-            
-            describe_response = bedrock.invoke_model(
-                modelId="amazon.nova-lite-v1:0",
-                body=describe_body,
-                contentType="application/json",
-                accept="application/json"
-            )
-            
-            describe_output = json.loads(describe_response["body"].read())
-            sign_description = (
-                describe_output.get("output", {})
-                .get("message", {})
-                .get("content", [{}])[0]
-                .get("text", "")
-                .strip()
-            )
-            
-            if not sign_description or "no sign" in sign_description.lower():
-                sign_description = "No clear traffic sign detected"
-            
-            # Step 3: Generate precaution/warning
-            precaution_prompt = (
-                f"You are a driving assistant. The detected traffic sign is '{sign_description}'. "
-                f"Given the driving context '{context_info}', provide one concise precaution or safety warning."
-            )
-            
-            precaution_body = json.dumps({
-                "messages": [{"role": "user", "content": [{"text": precaution_prompt}]}],
-                "inferenceConfig": {"maxTokens": 100, "temperature": 0.7}
-            })
-            
-            precaution_response = bedrock.invoke_model(
-                modelId="amazon.nova-lite-v1:0",
-                body=precaution_body,
-                contentType="application/json",
-                accept="application/json"
-            )
-            
-            precaution_output = json.loads(precaution_response["body"].read())
-            precaution = (
-                precaution_output.get("output", {})
-                .get("message", {})
-                .get("content", [{}])[0]
-                .get("text", "")
-                .strip()
-            )
-            
-            # Step 4: Store in DynamoDB
-            timestamp = datetime.utcnow().isoformat() + "Z"
-            item = {
-                "image_key": key,
-                "sign_description": sign_description,
-                "context": context_info,
-                "precaution_warning": precaution,
-                "timestamp": timestamp
+        with st.spinner("Analyzing traffic sign via API..."):
+            # Prepare payload for API Gateway (Lambda)
+            payload = {
+                "image_key": f"inputs/{selected_image}",
+                "context": context_info
             }
-            table.put_item(Item=item)
             
-            # Display results (centered)
-            col1, col2, col3 = st.columns([1, 3, 1])
-            with col2:
-                st.subheader("📸 Selected Image:")
-                st.write(f"**{selected_image}**")
+            try:
+                # POST to API Gateway (hardcoded us-east-1 endpoint; no user changes)
+                response = requests.post(
+                    API_URL,
+                    headers={"Content-Type": "application/json"},
+                    data=json.dumps(payload),
+                    timeout=60  # Allow time for Bedrock
+                )
                 
-                st.subheader("📝 Sign Description:")
-                st.write(sign_description)
-                
-                st.subheader("⚠️ Precaution & Warning:")
-                st.markdown(f"**\"{precaution}\"**")
-                
-                st.success("✅ Analysis complete! Stored in DynamoDB.")
+                if response.status_code == 200:
+                    result = response.json()
+                    
+                    # Display results (centered)
+                    col1, col2, col3 = st.columns([1, 3, 1])
+                    with col2:
+                        st.subheader("📸 Selected Image:")
+                        st.markdown(f"**{selected_image}**")
+                        
+                        st.subheader("📝 Sign Description:")
+                        st.write(result.get("sign_description", "No description available"))
+                        
+                        st.subheader("⚠️ Precaution & Warning:")
+                        st.markdown(f"**\"{result.get('precaution_warning', 'No warning available')}\"**")
+                        
+                        st.success("✅ Analysis complete! Stored in DynamoDB via Lambda.")
+                else:
+                    st.error(f"API Error: {response.status_code} - {response.text}")
+                    
+            except requests.exceptions.RequestException as e:
+                st.error(f"Request failed: {str(e)}")
     
     # Back button
     if st.button("← Back to Home", use_container_width=True):
